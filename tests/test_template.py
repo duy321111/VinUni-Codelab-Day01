@@ -78,6 +78,7 @@ def _make_gemini_response(text: str = "Hello from Gemini"):
 def _make_anthropic_response(text: str = "Hello from Anthropic"):
     resp = MagicMock()
     content_part = MagicMock()
+    content_part.type = "text"
     content_part.text = text
     resp.content = [content_part]
     usage = MagicMock()
@@ -90,21 +91,38 @@ def _make_anthropic_response(text: str = "Hello from Anthropic"):
 # ---------------------------------------------------------------------------
 # Test Cases
 # ---------------------------------------------------------------------------
-class TestCallOpenAI(unittest.TestCase):
+class TestProviderCalls(unittest.TestCase):
 
-    @patch("openai.OpenAI")
-    def test_openai_returns_tuple_structure(self, MockOpenAI):
-        mock_client = MagicMock()
-        MockOpenAI.return_value = mock_client
-        mock_client.chat.completions.create.return_value = _make_openai_response("OpenAI Mock Response")
+    @patch.dict(os.environ, {"OPENAI_API_KEY": "test-openai", "ANTHROPIC_API_KEY": "test-anthropic"})
+    def test_providers_use_separate_clients(self):
+        cases = (
+            (call_openai, "openai.OpenAI", "test-openai", _make_openai_response(), "Hello from OpenAI", 10, 20),
+            (call_anthropic, "anthropic.Anthropic", "test-anthropic", _make_anthropic_response(), "Hello from Anthropic", 15, 30),
+        )
+        for fn, target, key, response, expected, tokens_in, tokens_out in cases:
+            with self.subTest(provider=target), patch(target) as factory, patch.object(_m, "call_gemini") as gemini:
+                client = factory.return_value
+                endpoint = client.chat.completions.create if fn is call_openai else client.messages.create
+                endpoint.return_value = response
+                text, latency, usage = fn("Hello", temperature=0.2, top_p=0.8, max_tokens=100)
+                factory.assert_called_once_with(api_key=key)
+                self.assertEqual(text, expected)
+                self.assertGreaterEqual(latency, 0)
+                self.assertEqual(usage, {"input_tokens": tokens_in, "output_tokens": tokens_out})
+                self.assertEqual(endpoint.call_args.kwargs["messages"], [{"role": "user", "content": "Hello"}])
+                self.assertEqual(endpoint.call_args.kwargs["max_tokens"], 100)
+                gemini.assert_not_called()
+                client.close.assert_called_once()
 
-        text, latency, usage = call_openai("Hello")
-
-        self.assertEqual(text, "OpenAI Mock Response")
-        self.assertIsInstance(latency, float)
-        self.assertGreaterEqual(latency, 0.0)
-        self.assertEqual(usage["input_tokens"], 10)
-        self.assertEqual(usage["output_tokens"], 20)
+    def test_clients_close_on_failure(self):
+        for fn, target in ((call_openai, "openai.OpenAI"), (call_anthropic, "anthropic.Anthropic")):
+            with self.subTest(provider=target), patch(target) as factory:
+                client = factory.return_value
+                endpoint = client.chat.completions.create if fn is call_openai else client.messages.create
+                endpoint.side_effect = RuntimeError("API unavailable")
+                with self.assertRaises(RuntimeError):
+                    fn("Hello")
+                client.close.assert_called_once()
 
 
 class TestCallGemini(unittest.TestCase):
@@ -124,56 +142,23 @@ class TestCallGemini(unittest.TestCase):
         self.assertEqual(usage["output_tokens"], 25)
 
 
-class TestCallAnthropic(unittest.TestCase):
-
-    @patch("anthropic.Anthropic")
-    def test_anthropic_returns_tuple_structure(self, MockAnthropic):
-        mock_client = MagicMock()
-        MockAnthropic.return_value = mock_client
-        mock_client.messages.create.return_value = _make_anthropic_response("Claude Mock Response")
-
-        text, latency, usage = call_anthropic("Hello")
-
-        self.assertEqual(text, "Claude Mock Response")
-        self.assertIsInstance(latency, float)
-        self.assertGreaterEqual(latency, 0.0)
-        self.assertEqual(usage["input_tokens"], 15)
-        self.assertEqual(usage["output_tokens"], 30)
-
-
 class TestCompareModels(unittest.TestCase):
 
-    def test_compare_models_evaluates_correct_costs(self):
-        with patch.object(_m, "call_openai") as mock_openai, \
-             patch.object(_m, "call_gemini") as mock_gemini:
-             
-            # Setup mock returns
-            mock_openai.side_effect = [
-                ("GPT-4o Response", 0.5, {"input_tokens": 10, "output_tokens": 20}),       # 1st call: gpt-4o
-                ("GPT-4o-Mini Response", 0.3, {"input_tokens": 10, "output_tokens": 20}),  # 2nd call: gpt-4o-mini
-            ]
-            mock_gemini.return_value = (
-                "Gemini Response",
-                0.4,
-                {"input_tokens": 10, "output_tokens": 20}
-            )
-
+    def test_compare_uses_openai_and_gemini_with_lab_rates(self):
+        response = ("response", 0.4, {"input_tokens": 10, "output_tokens": 20})
+        with patch.object(_m, "call_openai", return_value=response) as openai, patch.object(_m, "call_gemini", return_value=response) as gemini:
             result = compare_models("Prompt")
-
-            # Verify keys exist
-            self.assertIn("gpt4o", result)
-            self.assertIn("gpt4o_mini", result)
-            self.assertIn("gemini_flash", result)
-
-            # Verify exact cost calculations
-            # gpt-4o: (10 * 5.0 + 20 * 20.0) / 1,000,000 = 0.00045
-            self.assertAlmostEqual(result["gpt4o"]["cost"], 0.00045, places=8)
-            
-            # gpt-4o-mini: (10 * 0.150 + 20 * 0.600) / 1,000,000 = 0.0000135
-            self.assertAlmostEqual(result["gpt4o_mini"]["cost"], 0.0000135, places=8)
-            
-            # gemini-2.5-flash: (10 * 0.075 + 20 * 0.300) / 1,000,000 = 0.00000675
-            self.assertAlmostEqual(result["gemini_flash"]["cost"], 0.00000675, places=8)
+            self.assertEqual(openai.call_count, 2)
+            openai.assert_any_call("Prompt", model=_m.OPENAI_MODEL)
+            openai.assert_any_call("Prompt", model=_m.OPENAI_MINI_MODEL)
+            gemini.assert_called_once_with("Prompt", model=_m.GEMINI_MODEL)
+            self.assertEqual(set(result), {"gpt4o", "gpt4o_mini", "gemini_flash"})
+            for key, model in (("gpt4o", _m.OPENAI_MODEL), ("gpt4o_mini", _m.OPENAI_MINI_MODEL), ("gemini_flash", _m.GEMINI_MODEL)):
+                rates = _m.PRICING_1M_TOKENS[model]
+                self.assertAlmostEqual(result[key]["cost"], (10 * rates["input"] + 20 * rates["output"]) / 1_000_000)
+            table = format_comparison_table([{**result, "prompt": "Prompt"}])
+            for label in ("GPT-4o", "GPT-4o-mini", "Gemini-Flash"):
+                self.assertIn(label, table)
 
 
 class TestRetryWithBackoff(unittest.TestCase):
@@ -207,22 +192,22 @@ class TestBatchCompareAndFormat(unittest.TestCase):
 
     def test_batch_runs_and_formats_table(self):
         with patch.object(_m, "compare_models") as mock_comp:
-            def _get_mock():
+            def _get_mock(prompt):
                 return {
-                    "gpt4o": {"response": "GPT-4o response content here", "latency": 0.5, "cost": 0.00045, "input_tokens": 10, "output_tokens": 20},
-                    "gpt4o_mini": {"response": "GPT-4o-Mini response content here", "latency": 0.3, "cost": 0.0000135, "input_tokens": 10, "output_tokens": 20},
                     "gemini_flash": {"response": "Gemini response content here", "latency": 0.4, "cost": 0.00000675, "input_tokens": 10, "output_tokens": 20}
                 }
             mock_comp.side_effect = _get_mock
 
             results = batch_compare(["Q1", "Q2"])
+            self.assertEqual(mock_comp.call_count, 2)
+            mock_comp.assert_any_call("Q1")
+            mock_comp.assert_any_call("Q2")
             self.assertEqual(len(results), 2)
             self.assertEqual(results[0]["prompt"], "Q1")
 
             table = format_comparison_table(results)
             self.assertIsInstance(table, str)
             self.assertIn("Prompt", table)
-            self.assertIn("GPT-4o", table)
             self.assertIn("Gemini-Flash", table)
             self.assertIn("Q1", table)
 

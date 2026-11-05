@@ -1,5 +1,12 @@
 # Student Guide: Nền tảng LLM API (Step-by-Step Walkthrough)
 
+> **Cấu hình: gọi riêng từng nhà cung cấp.** `call_openai` dùng `OPENAI_API_KEY`,
+> `call_gemini` dùng `GEMINI_API_KEY`, `call_anthropic` dùng `ANTHROPIC_API_KEY`.
+> `compare_models` so sánh GPT-4o, GPT-4o-mini và Gemini Flash theo Task 4.
+> Chatbot vẫn dùng Gemini. Claude mặc định là `claude-sonnet-4-6`; có thể đổi bằng
+> `ANTHROPIC_MODEL` trong `.env`. Chi phí hiển thị dùng bảng ước tính của bài lab,
+> không phải báo giá hiện tại.
+
 > [!NOTE]
 > Tài liệu này được thiết kế để hỗ trợ bạn hoàn thành bài Lab 01 một cách nhanh chóng nhất. Hãy sử dụng nó làm cẩm nang khi triển khai các hàm trong `template.py`.
 
@@ -104,7 +111,7 @@ Bạn có thể thiết lập biến môi trường trực tiếp từ terminal 
 * **SDK cần dùng:** `from openai import OpenAI`
 * **Cách khởi tạo:** `client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))`
 * **Hàm gọi:** `client.chat.completions.create(...)`
-* **Tham số:** 
+* **Tham số:**
   * `model`: chuỗi tên model (`gpt-4o` hoặc `gpt-4o-mini`).
   * `messages`: dạng danh sách hội thoại `[{"role": "user", "content": prompt}]`.
   * `temperature`, `top_p`, `max_tokens`.
@@ -114,7 +121,7 @@ Bạn có thể thiết lập biến môi trường trực tiếp từ terminal 
   # call API
   latency = time.time() - start
   ```
-* **Lấy Token Usage:** 
+* **Lấy Token Usage:**
   ```python
   input_tokens = response.usage.prompt_tokens
   output_tokens = response.usage.completion_tokens
@@ -159,7 +166,7 @@ Streaming giúp tạo trải nghiệm người dùng mượt mà giống như Ch
   for chunk in response_stream:
       print(chunk.text, end="", flush=True)
   ```
-* **Lịch sử hội thoại (History Management):** 
+* **Lịch sử hội thoại (History Management):**
   Giới hạn lịch sử ở 3 lượt hội thoại gần nhất (tương đương 6 tin nhắn).
   ```python
   # Cắt lịch sử nếu quá dài
